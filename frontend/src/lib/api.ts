@@ -104,6 +104,8 @@ export const generateContent = async (text: string, topic?: string): Promise<Con
   const response = await api.post('/api/v1/llm/generate-content', {
     text,
     topic,
+  }, {
+    timeout: 300000, // 5 minute timeout
   })
   return response.data
 }

@@ -346,22 +346,25 @@ class PDFService:
             structure: Extracted structure information
             
         Returns:
-            Dictionary containing Excel-ready data
+            Dictionary containing Excel-ready data with multiple rows per chapter
         """
         try:
             # Use LLM to analyze and structure the content
             content_analysis = await self._analyze_content_with_llm(pdf_text, structure)
             
-            # Create Excel data structure
+            # Create Excel data structure - each subtopic gets its own row
             excel_data = []
             
             for item in content_analysis:
+                # Each item represents a different subtopic and gets its own row
                 excel_data.append({
                     'Topic': item.get('topic', ''),
                     'Subtopic': item.get('subtopic', ''),
                     'Content': item.get('content', ''),
                     'Video_Link': item.get('video_link', '')
                 })
+            
+            logger.info(f"Created {len(excel_data)} Excel rows from {len(content_analysis)} content items")
             
             return {
                 'success': True,

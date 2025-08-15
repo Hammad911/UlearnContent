@@ -29,10 +29,40 @@ class LLMService:
         else:
             self.gemini_model = None
             logger.warning("Gemini API key not configured")
+        
+        # Rate limiting
+        self.last_gemini_call = 0
+        self.gemini_calls_this_minute = 0
+        self.minute_start = time.time()
+    
+    def _check_gemini_rate_limit(self) -> bool:
+        """Check if we can make a Gemini API call without hitting rate limits"""
+        current_time = time.time()
+        
+        # Reset counter if a minute has passed
+        if current_time - self.minute_start >= 60:
+            self.gemini_calls_this_minute = 0
+            self.minute_start = current_time
+        
+        # Check if we're under the limit (8 calls per minute to be safe)
+        if self.gemini_calls_this_minute >= 8:
+            logger.warning("Gemini rate limit approaching, using OpenAI fallback")
+            return False
+        
+        # Add minimum delay between calls
+        if current_time - self.last_gemini_call < 2:  # 2 second minimum delay
+            time.sleep(2 - (current_time - self.last_gemini_call))
+        
+        return True
+    
+    def _increment_gemini_calls(self):
+        """Increment the Gemini call counter"""
+        self.gemini_calls_this_minute += 1
+        self.last_gemini_call = time.time()
     
     async def generate_educational_content(self, text: str, topic: str = None) -> Dict[str, Any]:
         """
-        Generate educational content from OCR extracted text - improved version
+        Generate educational content from OCR extracted text - optimized for speed
         
         Args:
             text: OCR extracted text
@@ -44,33 +74,68 @@ class LLMService:
         try:
             start_time = time.time()
             
-            # Convert formulas to MathJax using MathPix if available
-            processed_text = await self._convert_formulas_with_mathpix(text)
+            # Limit text length for faster processing
+            max_text_length = 2000  # Reduced from 3000
+            processed_text = text[:max_text_length]
             
-            # First, analyze the text to identify chapter structure
+            # Quick content type detection
+            is_math_content = any(keyword in text.lower() for keyword in [
+                'equation', 'formula', 'theorem', 'proof', 'mathematics', 'algebra', 
+                'calculus', 'geometry', 'trigonometry', 'complex', 'polynomial'
+            ])
+            
+            # Convert formulas to MathJax only for mathematical content
+            if is_math_content:
+                processed_text = await self._convert_formulas_with_mathpix(processed_text)
+            
+            # Simplified, faster analysis prompt
             analysis_prompt = f"""
-            Analyze this educational text and identify the main chapter/topic structure.
+            Quickly analyze this educational text and identify 5-7 specific subtopics.
             
-            Text: {processed_text[:2000]}  # Limit for analysis
+            Text: {processed_text}
             
-            Return a JSON object with:
+            Return JSON:
             {{
-                "main_chapter": "Chapter name or main topic",
-                "subtopics": ["Subtopic 1", "Subtopic 2", "Subtopic 3"],
-                "content_type": "textbook|curriculum|lesson|other"
+                "main_chapter": "Chapter name",
+                "subtopics": ["Subtopic 1", "Subtopic 2", "Subtopic 3", "Subtopic 4", "Subtopic 5"]
             }}
             
-            Look for:
-            - Chapter titles, headings, or main topics
-            - Natural divisions in the content
-            - Educational structure patterns
+            Guidelines:
+            - Identify specific, concrete subtopics
+            - Focus on main concepts, definitions, processes, or topics
+            - Keep subtopic names concise and clear
+            - Aim for 5-7 subtopics maximum
             """
             
-            # Get structure analysis
-            if self.gemini_model:
-                structure_response = await self._call_gemini(analysis_prompt)
-            else:
-                structure_response = await self._call_openai(analysis_prompt)
+            # Get structure analysis with timeout
+            try:
+                if self.gemini_model and self._check_gemini_rate_limit():
+                    try:
+                        structure_response = await asyncio.wait_for(
+                            self._call_gemini(analysis_prompt), 
+                            timeout=30.0  # 30 second timeout
+                        )
+                        self._increment_gemini_calls()
+                    except Exception as gemini_error:
+                        if "429" in str(gemini_error) or "quota" in str(gemini_error).lower():
+                            logger.warning("Gemini rate limit hit, falling back to OpenAI")
+                            if settings.OPENAI_API_KEY:
+                                structure_response = await asyncio.wait_for(
+                                    self._call_openai(analysis_prompt), 
+                                    timeout=30.0
+                                )
+                            else:
+                                raise gemini_error
+                        else:
+                            raise gemini_error
+                else:
+                    structure_response = await asyncio.wait_for(
+                        self._call_openai(analysis_prompt), 
+                        timeout=30.0
+                    )
+            except asyncio.TimeoutError:
+                logger.warning("Structure analysis timed out, using fallback")
+                structure_response = '{"main_chapter": "' + (topic or 'General Content') + '", "subtopics": ["Introduction", "Main Concepts", "Key Definitions", "Important Processes", "Applications"]}'
             
             # Parse structure
             try:
@@ -83,74 +148,101 @@ class LLMService:
                 
                 structure_data = json.loads(cleaned_structure)
                 main_chapter = structure_data.get('main_chapter', topic or 'General Content')
-                subtopics = structure_data.get('subtopics', ['Main Content'])
-                content_type = structure_data.get('content_type', 'textbook')
-            except:
+                subtopics = structure_data.get('subtopics', [])
+                
+                # Ensure we have subtopics
+                if not subtopics or len(subtopics) < 3:
+                    subtopics = await self._generate_quick_subtopics(processed_text, main_chapter)
+                    
+            except Exception as e:
+                logger.warning(f"Structure parsing failed: {str(e)}")
                 main_chapter = topic or 'General Content'
-                subtopics = ['Main Content']
-                content_type = 'textbook'
+                subtopics = await self._generate_quick_subtopics(processed_text, main_chapter)
             
-            # Generate content for each subtopic
+            # Generate content for each subtopic with timeout
             content_items = []
             
-            for subtopic in subtopics:
+            for i, subtopic in enumerate(subtopics):
+                # Skip if we already have enough content items
+                if len(content_items) >= 6:
+                    break
+                
+                # Add delay between calls to prevent rate limiting
+                if i > 0:
+                    await asyncio.sleep(1)  # 1 second delay between calls
+                    
+                # Simplified, faster content prompt
                 content_prompt = f"""
-                Generate educational content for the subtopic "{subtopic}" based on this text.
+                Create brief educational content for "{subtopic}" based on this text.
                 
                 Chapter: {main_chapter}
                 Subtopic: {subtopic}
-                Content Type: {content_type}
+                Text: {processed_text[:1000]}  # Reduced text length
                 
-                Original Text: {processed_text}
-                
-                Create educational content that:
-                1. Explains the concepts clearly and concisely
-                2. Provides examples or applications where appropriate
-                3. Uses proper educational language
-                4. Maintains mathematical formulas in LaTeX format
-                5. Is suitable for students
-                
-                Return the content as a well-structured educational explanation.
+                Guidelines:
+                - Write 2-3 concise paragraphs (100-200 words)
+                - Focus only on this specific subtopic
+                - Use clear, simple language
+                - Include key points and examples
+                - Keep it educational but brief
                 """
                 
-                if self.gemini_model:
-                    content_response = await self._call_gemini(content_prompt)
-                else:
-                    content_response = await self._call_openai(content_prompt)
-                
-                content_items.append({
-                    'topic': main_chapter,
-                    'subtopic': subtopic,
-                    'content': content_response.strip()
-                })
+                try:
+                    if self.gemini_model and self._check_gemini_rate_limit():
+                        try:
+                            content_response = await asyncio.wait_for(
+                                self._call_gemini(content_prompt), 
+                                timeout=45.0  # 45 second timeout per subtopic
+                            )
+                            self._increment_gemini_calls()
+                        except Exception as gemini_error:
+                            if "429" in str(gemini_error) or "quota" in str(gemini_error).lower():
+                                logger.warning(f"Gemini rate limit hit for subtopic {subtopic}, falling back to OpenAI")
+                                if settings.OPENAI_API_KEY:
+                                    content_response = await asyncio.wait_for(
+                                        self._call_openai(content_prompt), 
+                                        timeout=45.0
+                                    )
+                                else:
+                                    raise gemini_error
+                            else:
+                                raise gemini_error
+                    else:
+                        content_response = await asyncio.wait_for(
+                            self._call_openai(content_prompt), 
+                            timeout=45.0
+                        )
+                    
+                    content_items.append({
+                        'topic': main_chapter,
+                        'subtopic': subtopic,
+                        'content': content_response.strip()
+                    })
+                    
+                except asyncio.TimeoutError:
+                    logger.warning(f"Content generation timed out for subtopic: {subtopic}")
+                    # Add fallback content
+                    content_items.append({
+                        'topic': main_chapter,
+                        'subtopic': subtopic,
+                        'content': f"Content for {subtopic} based on the provided educational material."
+                    })
+                except Exception as e:
+                    logger.warning(f"Error generating content for {subtopic}: {str(e)}")
+                    # Add fallback content
+                    content_items.append({
+                        'topic': main_chapter,
+                        'subtopic': subtopic,
+                        'content': f"Content for {subtopic} based on the provided educational material."
+                    })
+                    continue
             
-            # If no subtopics were found, create a single comprehensive content item
-            if len(content_items) == 0 or (len(content_items) == 1 and content_items[0]['subtopic'] == 'Main Content'):
-                comprehensive_prompt = f"""
-                Create comprehensive educational content from this text.
-                
-                Chapter: {main_chapter}
-                Text: {processed_text}
-                
-                Generate educational content that:
-                1. Explains the main concepts clearly
-                2. Breaks down complex ideas into understandable parts
-                3. Provides relevant examples
-                4. Uses proper educational structure
-                5. Maintains mathematical formulas in LaTeX format
-                
-                Return well-structured educational content.
-                """
-                
-                if self.gemini_model:
-                    comprehensive_response = await self._call_gemini(comprehensive_prompt)
-                else:
-                    comprehensive_response = await self._call_openai(comprehensive_prompt)
-                
+            # Ensure we have at least some content
+            if len(content_items) == 0:
                 content_items = [{
                     'topic': main_chapter,
-                    'subtopic': 'Comprehensive Content',
-                    'content': comprehensive_response.strip()
+                    'subtopic': 'Main Content',
+                    'content': processed_text[:500] + "..." if len(processed_text) > 500 else processed_text
                 }]
             
             processing_time = time.time() - start_time
@@ -173,6 +265,79 @@ class LLMService:
                 'original_text': text,
                 'content_items': []
             }
+    
+    async def _generate_quick_subtopics(self, text: str, main_chapter: str) -> List[str]:
+        """Generate subtopics quickly with timeout"""
+        try:
+            prompt = f"""
+            Quickly suggest 5-6 specific subtopics for this educational content.
+            
+            Chapter: {main_chapter}
+            Text: {text[:1000]}
+            
+            Return JSON array: ["Subtopic 1", "Subtopic 2", "Subtopic 3", "Subtopic 4", "Subtopic 5"]
+            
+            Focus on main concepts, definitions, processes, or key topics.
+            """
+            
+            if self.gemini_model and self._check_gemini_rate_limit():
+                try:
+                    response = await asyncio.wait_for(
+                        self._call_gemini(prompt), 
+                        timeout=20.0
+                    )
+                    self._increment_gemini_calls()
+                except Exception as gemini_error:
+                    if "429" in str(gemini_error) or "quota" in str(gemini_error).lower():
+                        logger.warning("Gemini rate limit hit in quick subtopics, falling back to OpenAI")
+                        if settings.OPENAI_API_KEY:
+                            response = await asyncio.wait_for(
+                                self._call_openai(prompt), 
+                                timeout=20.0
+                            )
+                        else:
+                            raise gemini_error
+                    else:
+                        raise gemini_error
+            else:
+                response = await asyncio.wait_for(
+                    self._call_openai(prompt), 
+                    timeout=20.0
+                )
+            
+            try:
+                cleaned_response = response.strip()
+                if cleaned_response.startswith('```json'):
+                    cleaned_response = cleaned_response[7:]
+                if cleaned_response.endswith('```'):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+                
+                subtopics = json.loads(cleaned_response)
+                if isinstance(subtopics, list) and len(subtopics) > 0:
+                    return subtopics[:6]  # Limit to 6 subtopics
+            except:
+                pass
+            
+            # Quick fallback subtopics
+            return [
+                "Introduction",
+                "Main Concepts", 
+                "Key Definitions",
+                "Important Processes",
+                "Applications",
+                "Summary"
+            ]
+            
+        except Exception as e:
+            logger.warning(f"Quick subtopic generation failed: {str(e)}")
+            return [
+                "Introduction",
+                "Main Concepts",
+                "Key Definitions", 
+                "Important Processes",
+                "Applications"
+            ]
     
     async def _convert_formulas_with_mathpix(self, text: str) -> str:
         """

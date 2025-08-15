@@ -31,6 +31,8 @@ export default function Home() {
   const [contentBreakdown, setContentBreakdown] = useState<any>(null)
   const [excelContent, setExcelContent] = useState<any[]>([])
   const [topic, setTopic] = useState('')
+  const [generationProgress, setGenerationProgress] = useState<string>('')
+  const [generationTime, setGenerationTime] = useState<number>(0)
 
   const onDrop = (acceptedFiles: File[]) => {
     setUploadedFiles(acceptedFiles)
@@ -149,8 +151,38 @@ export default function Home() {
     }
 
     setIsProcessing(true)
+    setGenerationProgress('Starting content generation...')
+    setGenerationTime(0)
+    
+    // Start timer
+    const startTime = Date.now()
+    const timerInterval = setInterval(() => {
+      setGenerationTime(Math.floor((Date.now() - startTime) / 1000))
+    }, 1000)
+    
     try {
+      // Simulate progress updates
+      const progressInterval = setInterval(() => {
+        setGenerationProgress(prev => {
+          if (prev.includes('Analyzing text structure')) {
+            return 'Generating subtopics...'
+          } else if (prev.includes('Generating subtopics')) {
+            return 'Creating educational content...'
+          } else if (prev.includes('Creating educational content')) {
+            return 'Finalizing content...'
+          } else {
+            return 'Analyzing text structure...'
+          }
+        })
+      }, 3000) // Update every 3 seconds
+      
       const result = await generateContent(extractedText, topic || undefined)
+      
+      // Clear intervals
+      clearInterval(progressInterval)
+      clearInterval(timerInterval)
+      setGenerationProgress('')
+      setGenerationTime(0)
       
       const newResult: ProcessingResult = {
         id: Date.now().toString(),
@@ -163,7 +195,18 @@ export default function Home() {
 
       toast.success(`Generated ${result.total_items} content items successfully!`)
     } catch (error) {
-      toast.error('Failed to generate educational content')
+      // Clear intervals
+      clearInterval(timerInterval)
+      setGenerationProgress('')
+      setGenerationTime(0)
+      
+      if (error && typeof error === 'object' && 'toString' in error && error.toString().includes('timeout')) {
+        toast.error('Content generation timed out. Please try with a smaller document or try again.')
+      } else if (error && typeof error === 'object' && 'toString' in error && (error.toString().includes('429') || error.toString().includes('quota'))) {
+        toast.error('API rate limit reached. Please wait a minute and try again, or use a smaller document.')
+      } else {
+        toast.error('Failed to generate educational content')
+      }
       console.error('Content Generation Error:', error)
     } finally {
       setIsProcessing(false)
@@ -455,6 +498,34 @@ export default function Home() {
                   />
                 </div>
 
+                {/* Progress Indicator */}
+                {generationProgress && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="loading-spinner w-5 h-5"></div>
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-blue-800">
+                          {generationProgress}
+                        </p>
+                        <p className="text-xs text-blue-600 mt-1">
+                          This may take 1-3 minutes for large documents...
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-medium text-blue-800">
+                          {Math.floor(generationTime / 60)}:{(generationTime % 60).toString().padStart(2, '0')}
+                        </p>
+                        <p className="text-xs text-blue-600">elapsed</p>
+                      </div>
+                    </div>
+                    
+                    {/* Progress Bar */}
+                    <div className="w-full bg-blue-200 rounded-full h-2">
+                      <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{ width: '60%' }}></div>
+                    </div>
+                  </div>
+                )}
+
                 <button
                   onClick={handleContentGeneration}
                   disabled={isProcessing || !extractedText.trim()}
@@ -503,7 +574,7 @@ export default function Home() {
                     <div key={result.id} className="border rounded-lg p-4 bg-gray-50">
                       <div className="flex items-center justify-between mb-3">
                         <span className="text-sm font-medium text-primary-600">
-                          Generated Content
+                          Generated Content ({result.contentItems.length} subtopics)
                         </span>
                         <div className="text-xs text-gray-500">
                           <div>{result.timestamp.toLocaleTimeString()}</div>
@@ -511,9 +582,13 @@ export default function Home() {
                         </div>
                       </div>
                       
+                      <div className="mb-3 p-2 bg-blue-50 rounded text-sm text-blue-700">
+                        <strong>Note:</strong> Each subtopic below will appear on a separate row in Excel output.
+                      </div>
+                      
                       <div className="space-y-3">
                         {result.contentItems.map((item, index) => (
-                          <div key={index} className="bg-white rounded p-3">
+                          <div key={index} className="bg-white rounded p-3 border-l-4 border-blue-500">
                             <div className="flex items-center gap-2 mb-2">
                               <span className="text-sm font-medium text-blue-600">{item.topic}</span>
                               {item.subtopic && (
@@ -522,6 +597,9 @@ export default function Home() {
                                   <span className="text-sm font-medium text-green-600">{item.subtopic}</span>
                                 </>
                               )}
+                              <span className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">
+                                Row {index + 1}
+                              </span>
                             </div>
                             <div className="text-sm text-gray-700 max-h-32 overflow-y-auto">
                               <p className="whitespace-pre-wrap">{item.content}</p>
