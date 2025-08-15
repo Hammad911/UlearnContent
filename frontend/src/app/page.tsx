@@ -2,16 +2,22 @@
 
 import { useState } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { Upload, FileText, Brain, Download, Trash2, FileSpreadsheet, BookOpen } from 'lucide-react'
+import { Upload, FileText, Brain, Download, Trash2, BookOpen } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { processImage, processText, processPDF, generateExcelFromPDF, generateContent, getExcelContent } from '@/lib/api'
+import { processImage, processPDF, generateExcelFromPDF, generateContent, getExcelContent } from '@/lib/api'
 import { cn } from '@/lib/utils'
+
+interface ContentItem {
+  topic: string
+  subtopic: string
+  content: string
+}
 
 interface ProcessingResult {
   id: string
   originalText: string
-  processedText: string
-  taskType: string
+  contentItems: ContentItem[]
+  processingTime: number
   timestamp: Date
 }
 
@@ -20,11 +26,11 @@ export default function Home() {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([])
   const [extractedText, setExtractedText] = useState('')
   const [processingResults, setProcessingResults] = useState<ProcessingResult[]>([])
-  const [selectedTask, setSelectedTask] = useState('summarize')
   const [pdfData, setPdfData] = useState<any>(null)
   const [activeTab, setActiveTab] = useState<'ocr' | 'pdf'>('ocr')
   const [contentBreakdown, setContentBreakdown] = useState<any>(null)
   const [excelContent, setExcelContent] = useState<any[]>([])
+  const [topic, setTopic] = useState('')
 
   const onDrop = (acceptedFiles: File[]) => {
     setUploadedFiles(acceptedFiles)
@@ -136,49 +142,29 @@ export default function Home() {
     }
   }
 
-  const handleLLMProcessing = async () => {
+  const handleContentGeneration = async () => {
     if (!extractedText.trim()) {
-      toast.error('Please extract text from an image first')
+      toast.error('Please extract text from an image or PDF first')
       return
     }
 
     setIsProcessing(true)
     try {
-      let result;
+      const result = await generateContent(extractedText, topic || undefined)
       
-      if (selectedTask === 'generate_content') {
-        // Handle content generation separately
-        result = await generateContent(extractedText, 'educational')
-        const newResult: ProcessingResult = {
-          id: Date.now().toString(),
-          originalText: extractedText,
-          processedText: result.generated_content,
-          taskType: selectedTask,
-          timestamp: new Date()
-        }
-        setProcessingResults(prev => [newResult, ...prev])
-      } else {
-        // Handle other LLM tasks
-        result = await processText({
-          text: extractedText,
-          task_type: selectedTask,
-          additional_context: {}
-        })
-
-        const newResult: ProcessingResult = {
-          id: Date.now().toString(),
-          originalText: extractedText,
-          processedText: result.processed_result,
-          taskType: selectedTask,
-          timestamp: new Date()
-        }
-        setProcessingResults(prev => [newResult, ...prev])
+      const newResult: ProcessingResult = {
+        id: Date.now().toString(),
+        originalText: extractedText,
+        contentItems: result.content_items,
+        processingTime: result.processing_time,
+        timestamp: new Date()
       }
+      setProcessingResults(prev => [newResult, ...prev])
 
-      toast.success(`${selectedTask.replace('_', ' ')} completed successfully!`)
+      toast.success(`Generated ${result.total_items} content items successfully!`)
     } catch (error) {
-      toast.error(`Failed to process text with ${selectedTask}`)
-      console.error('LLM Error:', error)
+      toast.error('Failed to generate educational content')
+      console.error('Content Generation Error:', error)
     } finally {
       setIsProcessing(false)
     }
@@ -188,6 +174,7 @@ export default function Home() {
     setUploadedFiles([])
     setExtractedText('')
     setProcessingResults([])
+    setTopic('')
     toast.success('All results cleared')
   }
 
@@ -202,7 +189,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'ocr-llm-results.json'
+    a.download = 'educational-content-results.json'
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -213,11 +200,10 @@ export default function Home() {
         {/* Header */}
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gradient mb-4">
-            OCR-to-LLM Pipeline
+            Educational Content Generator
           </h1>
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Extract text from images using OCR and process through Large Language Models 
-            for intelligent analysis and insights.
+            Extract text from images or PDFs and generate structured educational content with MathPix formula support.
           </p>
         </div>
 
@@ -274,19 +260,19 @@ export default function Home() {
                 <Upload className="w-12 h-12 mx-auto mb-4 text-gray-400" />
                 {isDragActive ? (
                   <p className="text-primary-600">Drop the files here...</p>
-                                 ) : (
-                   <div>
-                     <p className="text-gray-600 mb-2">
-                       Drag & drop {activeTab === 'ocr' ? 'images' : 'PDF files'} here, or click to select
-                     </p>
-                     <p className="text-sm text-gray-500">
-                       {activeTab === 'ocr' 
-                         ? 'Supports: JPG, PNG, GIF, BMP, TIFF'
-                         : 'Supports: PDF files with text and images'
-                       }
-                     </p>
-                   </div>
-                 )}
+                ) : (
+                  <div>
+                    <p className="text-gray-600 mb-2">
+                      Drag & drop {activeTab === 'ocr' ? 'images' : 'PDF files'} here, or click to select
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {activeTab === 'ocr' 
+                        ? 'Supports: JPG, PNG, GIF, BMP, TIFF'
+                        : 'Supports: PDF files with text and images'
+                      }
+                    </p>
+                  </div>
+                )}
               </div>
 
               {uploadedFiles.length > 0 && (
@@ -356,7 +342,7 @@ export default function Home() {
                         </div>
                       ) : (
                         <div className="flex items-center justify-center gap-2">
-                          <FileSpreadsheet className="w-4 h-4" />
+                          <Download className="w-4 h-4" />
                           Generate Excel
                         </div>
                       )}
@@ -446,47 +432,43 @@ export default function Home() {
             )}
           </div>
 
-          {/* Right Column - LLM Processing */}
+          {/* Right Column - Content Generation */}
           <div className="space-y-6">
-            {/* LLM Processing */}
+            {/* Content Generation */}
             <div className="card">
               <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
                 <Brain className="w-5 h-5" />
-                LLM Processing
+                Generate Educational Content
               </h2>
 
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Processing Task
+                    Topic (Optional)
                   </label>
-                  <select
-                    value={selectedTask}
-                    onChange={(e) => setSelectedTask(e.target.value)}
+                  <input
+                    type="text"
+                    value={topic}
+                    onChange={(e) => setTopic(e.target.value)}
+                    placeholder="e.g., Mathematics, Physics, Chemistry"
                     className="input-field"
-                  >
-                    <option value="summarize">Summarize</option>
-                    <option value="analyze">Analyze</option>
-                    <option value="translate">Translate</option>
-                    <option value="extract_entities">Extract Entities</option>
-                    <option value="generate_content">Generate Educational Content</option>
-                  </select>
+                  />
                 </div>
 
                 <button
-                  onClick={handleLLMProcessing}
+                  onClick={handleContentGeneration}
                   disabled={isProcessing || !extractedText.trim()}
                   className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isProcessing ? (
                     <div className="flex items-center justify-center gap-2">
                       <div className="loading-spinner" />
-                      Processing...
+                      Generating Content...
                     </div>
                   ) : (
                     <div className="flex items-center justify-center gap-2">
                       <Brain className="w-4 h-4" />
-                      Process with LLM
+                      Generate Educational Content
                     </div>
                   )}
                 </button>
@@ -497,7 +479,7 @@ export default function Home() {
             {processingResults.length > 0 && (
               <div className="card">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-xl font-semibold">Processing Results</h2>
+                  <h2 className="text-xl font-semibold">Generated Content</h2>
                   <div className="flex gap-2">
                     <button
                       onClick={downloadResults}
@@ -519,18 +501,33 @@ export default function Home() {
                 <div className="space-y-4">
                   {processingResults.map((result) => (
                     <div key={result.id} className="border rounded-lg p-4 bg-gray-50">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium text-primary-600 capitalize">
-                          {result.taskType.replace('_', ' ')}
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="text-sm font-medium text-primary-600">
+                          Generated Content
                         </span>
-                        <span className="text-xs text-gray-500">
-                          {result.timestamp.toLocaleTimeString()}
-                        </span>
+                        <div className="text-xs text-gray-500">
+                          <div>{result.timestamp.toLocaleTimeString()}</div>
+                          <div>{result.processingTime.toFixed(2)}s</div>
+                        </div>
                       </div>
-                      <div className="bg-white rounded p-3 max-h-32 overflow-y-auto">
-                        <p className="text-sm text-gray-700">
-                          {result.processedText}
-                        </p>
+                      
+                      <div className="space-y-3">
+                        {result.contentItems.map((item, index) => (
+                          <div key={index} className="bg-white rounded p-3">
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="text-sm font-medium text-blue-600">{item.topic}</span>
+                              {item.subtopic && (
+                                <>
+                                  <span className="text-gray-400">→</span>
+                                  <span className="text-sm font-medium text-green-600">{item.subtopic}</span>
+                                </>
+                              )}
+                            </div>
+                            <div className="text-sm text-gray-700 max-h-32 overflow-y-auto">
+                              <p className="whitespace-pre-wrap">{item.content}</p>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   ))}

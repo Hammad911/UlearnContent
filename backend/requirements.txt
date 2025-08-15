@@ -26,6 +26,4 @@ pandas==2.1.4
 mistralai==0.0.12
 google-generativeai==0.3.2
 requests==2.31.0
-Pillow==10.1.0
-opencv-python==4.8.1.78
 numpy==1.24.3 

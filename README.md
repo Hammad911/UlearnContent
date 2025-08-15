@@ -1,157 +1,128 @@
-# OCR-to-LLM Pipeline Project
+# Educational Content Generator
 
-A modern, industry-standard pipeline that extracts text from images using OCR and processes it through Large Language Models for intelligent analysis and insights.
+A streamlined application that extracts text from images or PDFs and generates structured educational content with MathPix formula support.
 
-## 🚀 Features
+## Features
 
-- **OCR Processing**: Extract text from images using advanced OCR technology
-- **LLM Integration**: Process extracted text through state-of-the-art language models
-- **RESTful API**: FastAPI backend with comprehensive endpoints
-- **Modern Frontend**: React-based user interface with real-time processing
-- **File Upload**: Support for multiple image formats
-- **Real-time Processing**: Live status updates and progress tracking
-- **Error Handling**: Robust error handling and validation
+- **Fast OCR Processing**: Simplified OCR with optimized image preprocessing
+- **PDF to Excel**: Convert PDF content to structured Excel format
+- **Educational Content Generation**: Generate topic-based educational content from extracted text
+- **MathPix Integration**: Automatic conversion of mathematical formulas to MathJax format
+- **Modern UI**: Clean, responsive interface built with Next.js and Tailwind CSS
 
-## 🏗️ Architecture
+## Performance Optimizations
 
-```
-ulearncontent/
-├── backend/                 # FastAPI backend
-│   ├── app/
-│   │   ├── api/            # API routes
-│   │   ├── core/           # Core configurations
-│   │   ├── models/         # Data models
-│   │   ├── services/       # Business logic
-│   │   └── utils/          # Utility functions
-│   ├── tests/              # Backend tests
-│   └── requirements.txt    # Python dependencies
-├── frontend/               # React frontend
-│   ├── src/
-│   │   ├── components/     # React components
-│   │   ├── pages/          # Page components
-│   │   ├── services/       # API services
-│   │   ├── utils/          # Utility functions
-│   │   └── styles/         # CSS/styling
-│   ├── public/             # Static assets
-│   └── package.json        # Node.js dependencies
-├── docs/                   # Documentation
-├── docker/                 # Docker configurations
-└── scripts/                # Utility scripts
-```
+- **Simplified OCR**: Single, most effective preprocessing approach
+- **Streamlined LLM Service**: Focused on educational content generation only
+- **Short Prompts**: Optimized prompts for faster generation
+- **MathPix API**: Professional formula conversion for mathematical content
 
-## 🛠️ Tech Stack
-
-### Backend
-- **FastAPI**: Modern, fast web framework for building APIs
-- **Pydantic**: Data validation using Python type annotations
-- **Uvicorn**: ASGI server for running FastAPI
-- **Pillow**: Image processing
-- **pytesseract**: OCR functionality
-- **Mistral AI**: Advanced OCR and text extraction from images
-- **Google Gemini AI**: Content generation and analysis
-- **OpenAI**: LLM integration (fallback)
-- **PyMuPDF**: PDF processing
-- **openpyxl**: Excel file generation
-- **pandas**: Data manipulation
-
-### Frontend
-- **Next.js 14**: React framework with App Router
-- **TypeScript**: Type-safe JavaScript
-- **Tailwind CSS**: Utility-first CSS framework
-- **Axios**: HTTP client
-- **React Query**: Data fetching and caching
-- **React Dropzone**: File upload component
-- **React Hot Toast**: Toast notifications
-
-### DevOps
-- **Docker**: Containerization
-- **Docker Compose**: Multi-container orchestration
-- **GitHub Actions**: CI/CD pipeline
-- **Black**: Code formatting
-- **Flake8**: Linting
-- **Pytest**: Testing framework
-
-## 🚀 Quick Start
+## Setup
 
 ### Prerequisites
-- Python 3.9+
-- Node.js 18+
-- Docker (optional)
+
+- Python 3.8+
+- Node.js 16+
+- Tesseract OCR
 
 ### Backend Setup
+
+1. Navigate to the backend directory:
 ```bash
 cd backend
+```
+
+2. Create a virtual environment:
+```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
+```bash
 pip install -r requirements.txt
-uvicorn app.main:app --reload
 ```
 
-### Frontend Setup
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The frontend will be available at http://localhost:3000
-
-### Docker Setup
-```bash
-docker-compose up --build
-```
-
-## 📚 API Documentation
-
-Once the backend is running, visit:
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-
-## 🧪 Testing
-
-### Backend Tests
-```bash
-cd backend
-pytest
-```
-
-### Frontend Tests
-```bash
-cd frontend
-npm test
-```
-
-## 📝 Environment Variables
-
-Create `.env` files in both backend and frontend directories:
-
-### Backend (.env)
+4. Create a `.env` file in the backend directory:
 ```env
-DATABASE_URL=sqlite:///./app.db
-MISTRAL_API_KEY=your_mistral_api_key
-GEMINI_API_KEY=your_gemini_api_key
+# API Keys (get from respective services)
 OPENAI_API_KEY=your_openai_api_key
-SECRET_KEY=your_secret_key
+GEMINI_API_KEY=your_gemini_api_key
+MATHPIX_API_KEY=your_mathpix_api_key
+MATHPIX_APP_ID=your_mathpix_app_id
+
+# Optional: Mistral AI for OCR
+MISTRAL_API_KEY=your_mistral_api_key
+
+# Server settings
 CORS_ORIGINS=http://localhost:3000
 ```
 
-### Frontend (.env.local)
+5. Run the backend server:
+```bash
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Frontend Setup
+
+1. Navigate to the frontend directory:
+```bash
+cd frontend
+```
+
+2. Install dependencies:
+```bash
+npm install
+```
+
+3. Create a `.env.local` file:
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ```
 
-## 🤝 Contributing
+4. Run the development server:
+```bash
+npm run dev
+```
+
+## Usage
+
+1. **Upload Files**: Drag and drop images or PDF files
+2. **Extract Text**: Use OCR for images or PDF processing
+3. **Generate Content**: Create structured educational content with topics and subtopics
+4. **Download Results**: Export content as JSON or Excel files
+
+## API Endpoints
+
+### OCR
+- `POST /api/v1/ocr/extract` - Extract text from images
+
+### PDF Processing
+- `POST /api/v1/pdf/extract` - Extract text and content from PDFs
+- `POST /api/v1/pdf/generate-excel` - Generate Excel file from PDF content
+
+### Content Generation
+- `POST /api/v1/llm/generate-content` - Generate educational content from text
+
+## MathPix Integration
+
+The application automatically detects mathematical formulas in the extracted text and converts them to proper MathJax format using the MathPix API. This ensures that mathematical expressions are properly formatted for educational content.
+
+## Performance Improvements
+
+- **Reduced Processing Time**: Simplified OCR and LLM workflows
+- **Optimized Prompts**: Shorter, more focused prompts for faster generation
+- **Streamlined API**: Removed unnecessary endpoints and complexity
+- **Better Error Handling**: Graceful fallbacks and clear error messages
+
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests
+4. Test thoroughly
 5. Submit a pull request
 
-## 📄 License
+## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-For support, please open an issue in the GitHub repository or contact the development team. 
+MIT License 

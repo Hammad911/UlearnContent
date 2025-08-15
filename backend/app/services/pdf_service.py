@@ -262,20 +262,33 @@ class PDFService:
             'sections': []
         }
         
-        # Common chapter patterns
+        # Enhanced chapter patterns for educational content
         chapter_patterns = [
             r'^Chapter\s+(\d+)[:\s]*(.+)$',
             r'^CHAPTER\s+(\d+)[:\s]*(.+)$',
             r'^(\d+)\.\s*(.+)$',
-            r'^(\d+)\s+(.+)$'
+            r'^(\d+)\s+(.+)$',
+            r'^Unit\s+(\d+)[:\s]*(.+)$',
+            r'^UNIT\s+(\d+)[:\s]*(.+)$',
+            r'^Lesson\s+(\d+)[:\s]*(.+)$',
+            r'^LESSON\s+(\d+)[:\s]*(.+)$',
+            r'^Topic\s+(\d+)[:\s]*(.+)$',
+            r'^TOPIC\s+(\d+)[:\s]*(.+)$',
+            r'^Section\s+(\d+)[:\s]*(.+)$',
+            r'^SECTION\s+(\d+)[:\s]*(.+)$',
+            # For curriculum documents
+            r'^(\d+\.\d+)\s*(.+)$',  # 1.1, 1.2, etc.
+            r'^(\d+\.\d+\.\d+)\s*(.+)$',  # 1.1.1, 1.1.2, etc.
         ]
         
-        # Common section patterns
+        # Enhanced section patterns
         section_patterns = [
-            r'^(\d+\.\d+)\s*(.+)$',
             r'^(\d+\.\d+\.\d+)\s*(.+)$',
+            r'^(\d+\.\d+\.\d+\.\d+)\s*(.+)$',
             r'^([A-Z][A-Z\s]+)$',
-            r'^([A-Z][a-z\s]+)$'
+            r'^([A-Z][a-z\s]+)$',
+            r'^([a-z][a-z\s]+)$',
+            r'^([A-Z][a-z]+[A-Z][a-z\s]+)$',  # CamelCase headings
         ]
         
         lines = text.split('\n')
@@ -283,27 +296,44 @@ class PDFService:
         for line_num, line in enumerate(lines):
             line = line.strip()
             
+            # Skip empty lines and very short lines
+            if not line or len(line) < 3:
+                continue
+                
             # Check for chapters
             for pattern in chapter_patterns:
                 match = re.match(pattern, line, re.IGNORECASE)
                 if match:
-                    structure['chapters'].append({
-                        'number': match.group(1),
-                        'title': match.group(2).strip(),
-                        'line': line_num + 1
-                    })
+                    chapter_title = match.group(2).strip() if len(match.groups()) > 1 else match.group(1)
+                    # Skip if the title is too short or looks like a page number
+                    if len(chapter_title) > 2 and not chapter_title.isdigit():
+                        structure['chapters'].append({
+                            'number': match.group(1),
+                            'title': chapter_title,
+                            'line': line_num + 1
+                        })
                     break
             
-            # Check for sections
-            for pattern in section_patterns:
-                match = re.match(pattern, line)
-                if match:
-                    structure['sections'].append({
-                        'number': match.group(1),
-                        'title': match.group(2).strip() if len(match.groups()) > 1 else match.group(1),
-                        'line': line_num + 1
-                    })
-                    break
+            # Check for sections (only if no chapter was found)
+            if not any(re.match(pattern, line, re.IGNORECASE) for pattern in chapter_patterns):
+                for pattern in section_patterns:
+                    match = re.match(pattern, line)
+                    if match:
+                        section_title = match.group(2).strip() if len(match.groups()) > 1 else match.group(1)
+                        # Skip if the title is too short
+                        if len(section_title) > 2:
+                            structure['sections'].append({
+                                'number': match.group(1),
+                                'title': section_title,
+                                'line': line_num + 1
+                            })
+                        break
+        
+        # Sort chapters and sections by line number
+        structure['chapters'].sort(key=lambda x: x['line'])
+        structure['sections'].sort(key=lambda x: x['line'])
+        
+        logger.info(f"Extracted {len(structure['chapters'])} chapters and {len(structure['sections'])} sections")
         
         return structure
     
@@ -374,22 +404,31 @@ class PDFService:
                     
                     # Generate structured content for this chapter with subtopics
                     try:
-                        structured_content = await llm_service.generate_structured_content(
+                        # Use the new improved content generation method
+                        content_result = await llm_service.generate_educational_content(
                             text=chapter_text,
-                            topic=f"Chapter {chapter['number']}: {chapter['title']}",
-                            difficulty_level="intermediate",
-                            target_audience="students"
+                            topic=f"Chapter {chapter['number']}: {chapter['title']}"
                         )
                         
-                        logger.info(f"Generated {len(structured_content)} structured content items for chapter {i+1}")
-                        
-                        # Add all structured content items to the list
-                        for item in structured_content:
+                        if content_result['success']:
+                            logger.info(f"Generated {len(content_result['content_items'])} content items for chapter {i+1}")
+                            
+                            # Add all content items to the list
+                            for item in content_result['content_items']:
+                                content_items.append({
+                                    'topic': item.get('topic', f"Chapter {chapter['number']}: {chapter['title']}"),
+                                    'subtopic': item.get('subtopic', ''),
+                                    'content': item.get('content', ''),
+                                    'video_link': item.get('video_link', '')
+                                })
+                        else:
+                            logger.error(f"Content generation failed for chapter {i+1}: {content_result.get('error', 'Unknown error')}")
+                            # Fallback to basic content
                             content_items.append({
-                                'topic': item.get('topic', f"Chapter {chapter['number']}: {chapter['title']}"),
-                                'subtopic': item.get('subtopic', ''),
-                                'content': item.get('content', ''),
-                                'video_link': item.get('video_link', '')
+                                'topic': f"Chapter {chapter['number']}: {chapter['title']}",
+                                'subtopic': 'Main Content',
+                                'content': chapter_text[:1000] + "..." if len(chapter_text) > 1000 else chapter_text,
+                                'video_link': ''
                             })
                             
                     except Exception as chapter_error:
@@ -398,51 +437,54 @@ class PDFService:
                         content_items.append({
                             'topic': f"Chapter {chapter['number']}: {chapter['title']}",
                             'subtopic': 'Main Content',
-                            'content': f"Content from Chapter {chapter['number']}: {chapter['title']}",
+                            'content': chapter_text[:1000] + "..." if len(chapter_text) > 1000 else chapter_text,
                             'video_link': ''
                         })
             else:
+                # No chapters found, process entire text
                 logger.info("No chapters found, processing entire text")
-                # If no chapters found, create structured content from the entire text
-                if text.strip():
-                    try:
-                        structured_content = await llm_service.generate_structured_content(
-                            text=text,
-                            topic="General Content",
-                            difficulty_level="intermediate",
-                            target_audience="students"
-                        )
+                try:
+                    content_result = await llm_service.generate_educational_content(text=text)
+                    
+                    if content_result['success']:
+                        logger.info(f"Generated {len(content_result['content_items'])} content items")
                         
-                        logger.info(f"Generated {len(structured_content)} structured content items for general content")
-                        
-                        # Add all structured content items to the list
-                        for item in structured_content:
+                        for item in content_result['content_items']:
                             content_items.append({
                                 'topic': item.get('topic', 'General Content'),
                                 'subtopic': item.get('subtopic', ''),
                                 'content': item.get('content', ''),
                                 'video_link': item.get('video_link', '')
                             })
-                            
-                    except Exception as general_error:
-                        logger.error(f"Error processing general content: {str(general_error)}")
+                    else:
+                        logger.error(f"Content generation failed: {content_result.get('error', 'Unknown error')}")
                         # Fallback to basic content
                         content_items.append({
                             'topic': 'General Content',
                             'subtopic': 'Main Content',
-                            'content': text[:500] + "..." if len(text) > 500 else text,
+                            'content': text[:1000] + "..." if len(text) > 1000 else text,
                             'video_link': ''
                         })
+                        
+                except Exception as e:
+                    logger.error(f"Error processing entire text: {str(e)}")
+                    # Final fallback
+                    content_items.append({
+                        'topic': 'General Content',
+                        'subtopic': 'Main Content',
+                        'content': text[:1000] + "..." if len(text) > 1000 else text,
+                        'video_link': ''
+                    })
             
-            logger.info(f"Final content items: {len(content_items)}")
+            logger.info(f"Total content items generated: {len(content_items)}")
             return content_items
             
         except Exception as e:
-            logger.error(f"Error analyzing content with LLM: {str(e)}")
-            # Return basic fallback content
+            logger.error(f"Error in LLM content analysis: {str(e)}")
+            # Return basic fallback
             return [{
-                'topic': 'Content Analysis',
-                'subtopic': '',
-                'content': text[:500] + "..." if len(text) > 500 else text,
+                'topic': 'General Content',
+                'subtopic': 'Main Content',
+                'content': text[:1000] + "..." if len(text) > 1000 else text,
                 'video_link': ''
-            }] 
+            }]
