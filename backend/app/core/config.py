@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     
     # OCR
     TESSERACT_CMD: str = "tesseract"
+
+    # fal.ai image generation
+    FAL_KEY: str = ""
+
+    # AWS S3
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_DEFAULT_REGION: str = "us-east-1"
+    S3_BUCKET_NAME: str = ""
+    S3_PUBLIC_BASE: str = ""
     
     class Config:
         env_file = ".env"

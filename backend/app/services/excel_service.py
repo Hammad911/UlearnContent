@@ -65,6 +65,17 @@ class ExcelService:
                 workbook = writer.book
                 worksheet = writer.sheets['Content']
                 self._apply_formatting(worksheet, df)
+                # Convert Content column to hyperlink when it looks like a URL
+                try:
+                    for row_idx in range(2, len(df) + 2):
+                        val = str(df.iloc[row_idx - 2]['Content']).strip()
+                        if val.startswith('http://') or val.startswith('https://'):
+                            cell = worksheet.cell(row=row_idx, column=3)
+                            cell.value = 'View Image'
+                            cell.hyperlink = val
+                            cell.style = 'Hyperlink'
+                except Exception as link_err:
+                    logger.warning(f"Failed to set hyperlinks: {str(link_err)}")
                 if detailed_content:
                     self._add_detailed_content_sheets(workbook, detailed_content)
             output.seek(0)

@@ -1,6 +1,6 @@
 import mistralai
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
+from mistralai import Mistral
+from mistralai.models import UserMessage
 import base64
 import io
 import logging
@@ -16,7 +16,7 @@ class MistralOCRService:
     """Service for OCR using Mistral AI Vision capabilities"""
     
     def __init__(self, api_key: str):
-        self.client = MistralClient(api_key=api_key)
+        self.client = Mistral(api_key=api_key)
         # Use a standard model that's more reliable
         self.model = "mistral-large-latest"
     
@@ -69,7 +69,7 @@ class MistralOCRService:
             ]
             
             # Call Mistral API
-            response = self.client.chat(
+            response = self.client.chat.complete(
                 model=self.model,
                 messages=messages,
                 max_tokens=4000,
@@ -132,7 +132,7 @@ class MistralOCRService:
                 )
             ]
             
-            response = self.client.chat(
+            response = self.client.chat.complete(
                 model=self.model,
                 messages=messages,
                 max_tokens=4000,
@@ -188,7 +188,7 @@ class MistralOCRService:
                 )
             ]
             
-            response = self.client.chat(
+            response = self.client.chat.complete(
                 model=self.model,
                 messages=messages,
                 max_tokens=2000,
@@ -264,7 +264,7 @@ class MistralOCRService:
                 )
             ]
             
-            response = self.client.chat(
+            response = self.client.chat.complete(
                 model=self.model,
                 messages=messages,
                 max_tokens=3000,

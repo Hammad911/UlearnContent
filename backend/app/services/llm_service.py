@@ -1,14 +1,17 @@
 import openai
 import asyncio
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 import logging
 import json
 import google.generativeai as genai
 from datetime import datetime
 import requests
+import re
 
 from app.core.config import settings
+from app.services.image_service import ImageService
+from app.services.s3_service import upload_image_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,12 @@ class LLMService:
         else:
             self.gemini_model = None
             logger.warning("Gemini API key not configured")
+        # Image generation service (fal.ai)
+        self.image_service = ImageService()
         
+        # S3 service for image uploads
+        self.s3_service = S3Service()
+    
         # Rate limiting
         self.last_gemini_call = 0
         self.gemini_calls_this_minute = 0
@@ -59,6 +67,73 @@ class LLMService:
         """Increment the Gemini call counter"""
         self.gemini_calls_this_minute += 1
         self.last_gemini_call = time.time()
+
+    # ---------- Subtopic governance helpers ----------
+    def _compute_target_subtopic_count(self, text: str) -> int:
+        """Return an adaptive subtopic count based on content length.
+        Heuristic in words:
+        - <= 300 words: 1
+        - 301-800: 2
+        - 801-1400: 3-4
+        - 1401-2400: 5-6
+        - 2401-4000: 7-9
+        - > 4000: up to 12 (cap)
+        """
+        words = len(re.findall(r"\w+", text))
+        if words <= 300:
+            return 1
+        if words <= 800:
+            return 2
+        if words <= 1400:
+            return 4
+        if words <= 2400:
+            return 6
+        if words <= 4000:
+            return 9
+        return 12
+
+    def _normalize_subtopic(self, name: str) -> str:
+        name = name.strip()
+        # Remove trailing punctuation and multiple dots
+        name = re.sub(r"\.{2,}$", "", name)
+        # Title-case key phrases but keep acronyms
+        return re.sub(r"\s+", " ", name)
+
+    def _root_key(self, name: str) -> str:
+        """Return a root key for merging similar subtopics (e.g., 'peptidoglycan')."""
+        lowered = re.sub(r"[^a-z0-9\s]", " ", name.lower())
+        tokens = [t for t in lowered.split() if t not in {
+            'the','a','an','of','in','and','on','to','for','with','by','about','overview','introduction','basics','basic','concepts','role','nature'
+        }]
+        if not tokens:
+            return lowered.strip()
+        # Prefer longest informative token (captures things like 'peptidoglycan')
+        return max(tokens, key=len)
+
+    def _dedupe_and_limit_subtopics(self, raw_subtopics: List[str], target_count: int) -> List[str]:
+        """Normalize, de-duplicate near-duplicates (by root key), and limit to target_count."""
+        seen_norm = set()
+        seen_roots = set()
+        result: List[str] = []
+        for s in raw_subtopics:
+            if not s or not isinstance(s, str):
+                continue
+            norm = self._normalize_subtopic(s)
+            root = self._root_key(norm)
+            if norm.lower() in seen_norm:
+                continue
+            if root in seen_roots:
+                # Already have a variant of this concept; skip to avoid repeats like many 'peptidoglycan'
+                continue
+            result.append(norm)
+            seen_norm.add(norm.lower())
+            seen_roots.add(root)
+            if len(result) >= target_count:
+                break
+        # Ensure at least one subtopic
+        if not result:
+            result = ["Main Content"]
+        return result
     
     async def generate_educational_content(self, text: str, topic: str = None) -> Dict[str, Any]:
         """
@@ -147,30 +222,40 @@ class LLMService:
                 cleaned_structure = cleaned_structure.strip()
                 
                 structure_data = json.loads(cleaned_structure)
-                main_chapter = structure_data.get('main_chapter', topic or 'General Content')
-                subtopics = structure_data.get('subtopics', [])
+                # Always keep topic constant: prefer explicit topic, else main_chapter from model, else default
+                main_chapter = topic or structure_data.get('main_chapter') or 'General Content'
+                raw_subtopics = structure_data.get('subtopics', [])
+                if not isinstance(raw_subtopics, list):
+                    raw_subtopics = []
+                
+                # Compute adaptive cap and normalize/dedupe
+                target_count = self._compute_target_subtopic_count(text)
+                subtopics = self._dedupe_and_limit_subtopics(raw_subtopics, target_count)
                 
                 # Ensure we have subtopics
-                if not subtopics or len(subtopics) < 3:
+                if not subtopics or len(subtopics) < 1:
                     subtopics = await self._generate_quick_subtopics(processed_text, main_chapter)
+                    subtopics = self._dedupe_and_limit_subtopics(subtopics, target_count)
                     
             except Exception as e:
                 logger.warning(f"Structure parsing failed: {str(e)}")
                 main_chapter = topic or 'General Content'
+                target_count = self._compute_target_subtopic_count(text)
                 subtopics = await self._generate_quick_subtopics(processed_text, main_chapter)
+                subtopics = self._dedupe_and_limit_subtopics(subtopics, target_count)
             
             # Generate content for each subtopic with timeout
             content_items = []
             
             for i, subtopic in enumerate(subtopics):
-                # Skip if we already have enough content items
-                if len(content_items) >= 6:
+                # Respect adaptive cap
+                if len(content_items) >= target_count:
                     break
                 
                 # Add delay between calls to prevent rate limiting
                 if i > 0:
                     await asyncio.sleep(1)  # 1 second delay between calls
-                    
+                
                 # Simplified, faster content prompt
                 content_prompt = f"""
                 Create brief educational content for "{subtopic}" based on this text.
@@ -213,10 +298,30 @@ class LLMService:
                             timeout=45.0
                         )
                     
+                    generated_text = content_response.strip()
+
+                    # Conditionally generate an image if it's likely helpful
+                    image_url: str = ""
+                    if self.image_service.is_configured() and self._needs_image(subtopic, generated_text):
+                        try:
+                            diagram_prompt = self._build_image_prompt(main_chapter, subtopic, generated_text)
+                            img_bytes = self.image_service.generate_diagram_png(diagram_prompt)
+                            if img_bytes:
+                                image_url = self.s3_service.upload_image_bytes(img_bytes, main_chapter, subtopic)
+                        except Exception as img_err:
+                            logger.warning(f"Image generation/upload failed for '{subtopic}': {str(img_err)}")
+
+                    # Always include the generated content, and add image URL if available
+                    content_value = generated_text
+                    if image_url:
+                        # Add the image URL to the content where it's most relevant
+                        content_value += f"\n\n[Image: {image_url}]"
+                    
                     content_items.append({
-                        'topic': main_chapter,
+                        'topic': main_chapter,  # constant topic
                         'subtopic': subtopic,
-                        'content': content_response.strip()
+                        'content': content_value,
+                        'image_url': image_url
                     })
                     
                 except asyncio.TimeoutError:
@@ -328,7 +433,7 @@ class LLMService:
                 "Applications",
                 "Summary"
             ]
-            
+                
         except Exception as e:
             logger.warning(f"Quick subtopic generation failed: {str(e)}")
             return [
@@ -355,7 +460,6 @@ class LLMService:
                 return text
             
             # Look for potential mathematical expressions
-            import re
             
             # Simple pattern to identify potential formulas
             formula_patterns = [
@@ -485,4 +589,345 @@ class LLMService:
             
         except Exception as e:
             logger.error(f"OpenAI API error: {str(e)}")
-            raise 
+            raise
+
+    def _needs_image(self, subtopic: str, content: str) -> bool:
+        """Heuristic: generate image for diagrams/processes/structures/geometry etc."""
+        text = f"{subtopic} {content}".lower()
+        keywords = [
+            "diagram", "flow", "process", "cycle", "structure", "anatomy", "map",
+            "timeline", "geometry", "graph", "chart", "circuit", "network", "ecosystem",
+            "cell", "molecule", "atom", "vector", "force", "free body", "ellipse", "triangle"
+        ]
+        return any(k in text for k in keywords)
+
+    def _build_image_prompt(self, topic: str, subtopic: str, content: str) -> str:
+        return (
+            f"Create a clean educational line diagram with labels for the subtopic '{subtopic}' "
+            f"under the chapter '{topic}'. White background, high contrast, minimal colors, vector-like, "
+            f"suitable for textbooks. Include only essential elements. Content summary to base the diagram on: {content[:400]}"
+        )
+
+    async def generate_educational_content_excel(self, text: str, topic: str = None) -> Dict[str, Any]:
+        """
+        Generate educational content and create Excel file
+        
+        Args:
+            text: OCR extracted text
+            topic: Topic or subject area (optional)
+            
+        Returns:
+            Dictionary containing Excel file information
+        """
+        try:
+            # First generate the educational content
+            content_result = await self.generate_educational_content(text, topic)
+            
+            if not content_result['success']:
+                return {
+                    'success': False,
+                    'error': content_result.get('error', 'Content generation failed')
+                }
+            
+            # Create Excel file
+            excel_result = await self._create_excel_file_from_content(
+                content_result['content_items'],
+                topic or content_result.get('topic', 'Educational Content')
+            )
+            
+            return {
+                'success': True,
+                'filename': excel_result['filename'],
+                'file_url': excel_result['file_url'],
+                'topic': topic or content_result.get('topic'),
+                'total_items': len(content_result['content_items']),
+                'generated_at': datetime.utcnow()
+            }
+            
+        except Exception as e:
+            logger.error(f"Excel generation error: {str(e)}")
+            return {
+                'success': False,
+                'error': f"Excel generation failed: {str(e)}"
+            }
+
+    async def _create_excel_file_from_content(self, content_items: List[Dict[str, str]], topic: str) -> Dict[str, Any]:
+        """
+        Create Excel file from educational content items
+        """
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            import os
+            
+            # Create workbook and worksheet
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Educational Content"
+            
+            # Set headers
+            headers = ["Topic", "Subtopic", "Content", "Video Link"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center")
+            
+            # Add content items
+            for row, item in enumerate(content_items, 2):
+                ws.cell(row=row, column=1, value=item.get('topic', topic))
+                ws.cell(row=row, column=2, value=item.get('subtopic', ''))
+                ws.cell(row=row, column=3, value=item.get('content', ''))
+                ws.cell(row=row, column=4, value=item.get('video_link', ''))
+            
+            # Auto-adjust column widths
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+                ws.column_dimensions[column_letter].width = adjusted_width
+            
+            # Generate filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"educational_content_{topic.replace(' ', '_')}_{timestamp}.xlsx"
+            
+            # Save file
+            file_path = os.path.join(settings.UPLOAD_DIR, filename)
+            wb.save(file_path)
+            
+            # Return file information
+            return {
+                'success': True,
+                'filename': filename,
+                'file_url': f"/api/v1/llm/download-excel/{filename}"
+            }
+            
+        except Exception as e:
+            logger.error(f"Excel file creation error: {str(e)}")
+            raise
+
+    async def generate_qna_excel(self, text: str, topic: str = None) -> Dict[str, Any]:
+        """
+        Generate Q&A pairs and create Excel file
+        
+        Args:
+            text: OCR extracted text
+            topic: Topic or subject area (optional)
+            
+        Returns:
+            Dictionary containing Excel file information
+        """
+        try:
+            # First generate the educational content to get subtopics
+            content_result = await self.generate_educational_content(text, topic)
+            
+            if not content_result['success']:
+                return {
+                    'success': False,
+                    'error': content_result.get('error', 'Content generation failed')
+                }
+            
+            # Generate Q&A pairs for each content item
+            qna_pairs = []
+            for item in content_result['content_items']:
+                qna_result = await self._generate_qna_for_content(
+                    item['content'], 
+                    item.get('topic', topic or 'Educational Content'),
+                    item.get('subtopic', 'Main Content')
+                )
+                qna_pairs.extend(qna_result)
+            
+            # Create Excel file
+            excel_result = await self._create_qna_excel_file(
+                qna_pairs,
+                topic or content_result.get('topic', 'Educational Content')
+            )
+            
+            return {
+                'success': True,
+                'filename': excel_result['filename'],
+                'file_url': excel_result['file_url'],
+                'topic': topic or content_result.get('topic'),
+                'total_questions': len(qna_pairs),
+                'generated_at': datetime.utcnow()
+            }
+            
+        except Exception as e:
+            logger.error(f"Q&A Excel generation error: {str(e)}")
+            return {
+                'success': False,
+                'error': f"Q&A Excel generation failed: {str(e)}"
+            }
+
+    async def _generate_qna_for_content(self, content: str, topic: str, subtopic: str) -> List[Dict[str, str]]:
+        """
+        Generate Q&A pairs for a specific content item
+        """
+        try:
+            # Limit content length for faster processing
+            max_content_length = 1000
+            processed_content = content[:max_content_length]
+            
+            # Create Q&A generation prompt
+            qna_prompt = f"""
+            Generate 3-5 educational question-answer pairs based on this content.
+            
+            Topic: {topic}
+            Subtopic: {subtopic}
+            Content: {processed_content}
+            
+            Return JSON format:
+            {{
+                "qa_pairs": [
+                    {{
+                        "question": "Question 1",
+                        "answer": "Answer 1"
+                    }},
+                    {{
+                        "question": "Question 2", 
+                        "answer": "Answer 2"
+                    }}
+                ]
+            }}
+            
+            Guidelines:
+            - Create clear, educational questions
+            - Provide comprehensive, accurate answers
+            - Focus on key concepts and important information
+            - Make questions specific to the content
+            - Keep answers informative but concise (2-3 sentences)
+            - Generate 3-5 Q&A pairs maximum
+            """
+            
+            # Generate Q&A pairs
+            try:
+                if self.gemini_model and self._check_gemini_rate_limit():
+                    qna_response = await asyncio.wait_for(
+                        self._call_gemini(qna_prompt), 
+                        timeout=60.0
+                    )
+                    self._increment_gemini_calls()
+                else:
+                    qna_response = await asyncio.wait_for(
+                        self._call_openai(qna_prompt), 
+                        timeout=60.0
+                    )
+            except Exception as e:
+                logger.error(f"Q&A generation failed: {str(e)}")
+                # Fallback: create basic Q&A pairs
+                return [{
+                    'topic': topic,
+                    'subtopic': subtopic,
+                    'question': f"What is the main concept discussed in {subtopic}?",
+                    'answer': processed_content[:200] + "..." if len(processed_content) > 200 else processed_content
+                }]
+            
+            # Parse Q&A response
+            try:
+                cleaned_response = qna_response.strip()
+                if cleaned_response.startswith('```json'):
+                    cleaned_response = cleaned_response[7:]
+                if cleaned_response.endswith('```'):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+                
+                qna_data = json.loads(cleaned_response)
+                qa_pairs = qna_data.get('qa_pairs', [])
+                
+                # Format Q&A pairs with topic and subtopic
+                formatted_pairs = []
+                for pair in qa_pairs:
+                    formatted_pairs.append({
+                        'topic': topic,
+                        'subtopic': subtopic,
+                        'question': pair.get('question', ''),
+                        'answer': pair.get('answer', '')
+                    })
+                
+                return formatted_pairs
+                
+            except json.JSONDecodeError:
+                logger.error("Failed to parse Q&A JSON response")
+                # Fallback: create basic Q&A pairs
+                return [{
+                    'topic': topic,
+                    'subtopic': subtopic,
+                    'question': f"What is the main concept discussed in {subtopic}?",
+                    'answer': processed_content[:200] + "..." if len(processed_content) > 200 else processed_content
+                }]
+                
+        except Exception as e:
+            logger.error(f"Q&A generation error: {str(e)}")
+            return [{
+                'topic': topic,
+                'subtopic': subtopic,
+                'question': f"What is the main concept discussed in {subtopic}?",
+                'answer': content[:200] + "..." if len(content) > 200 else content
+            }]
+
+    async def _create_qna_excel_file(self, qna_pairs: List[Dict[str, str]], topic: str) -> Dict[str, Any]:
+        """
+        Create Excel file from Q&A pairs
+        """
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            import os
+            
+            # Create workbook and worksheet
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Q&A Content"
+            
+            # Set headers
+            headers = ["Topic", "Sub-Topic", "Question", "Answer"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center")
+            
+            # Add Q&A pairs
+            for row, pair in enumerate(qna_pairs, 2):
+                ws.cell(row=row, column=1, value=pair.get('topic', topic))
+                ws.cell(row=row, column=2, value=pair.get('subtopic', ''))
+                ws.cell(row=row, column=3, value=pair.get('question', ''))
+                ws.cell(row=row, column=4, value=pair.get('answer', ''))
+            
+            # Auto-adjust column widths
+            for column in ws.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 60)  # Cap at 60 characters for Q&A
+                ws.column_dimensions[column_letter].width = adjusted_width
+            
+            # Generate filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"qa_content_{topic.replace(' ', '_')}_{timestamp}.xlsx"
+            
+            # Save file
+            file_path = os.path.join(settings.UPLOAD_DIR, filename)
+            wb.save(file_path)
+            
+            # Return file information
+            return {
+                'success': True,
+                'filename': filename,
+                'file_url': f"/api/v1/llm/download-qna-excel/{filename}"
+            }
+            
+        except Exception as e:
+            logger.error(f"Q&A Excel file creation error: {str(e)}")
+            raise
