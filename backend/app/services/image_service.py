@@ -17,7 +17,7 @@ class ImageService:
 
     def __init__(self):
         # Use API key from settings (you can set this in .env file)
-        self.api_key = settings.GEMINI_API_KEY or "AIzaSyCquw0k0oflHN8rC0aWwjkQFDmWFJ0f5bs"  # Fallback to your key
+        self.api_key = settings.GEMINI_API_KEY   # Fallback to your key
         self.model_name = settings.GEMINI_IMAGE_MODEL or "gemini-2.5-flash-image-preview"
         
         if GENAI_AVAILABLE and self.api_key:
