@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     
+    # Google Gemini AI (for image generation)
+    GEMINI_IMAGE_MODEL: str = "gemini-2.5-flash-image-preview"
+    
     # MathPix (for formula conversion)
     MATHPIX_API_KEY: str = ""
     MATHPIX_APP_ID: str = ""
@@ -40,8 +43,13 @@ class Settings(BaseSettings):
     # OCR
     TESSERACT_CMD: str = "tesseract"
 
-    # fal.ai image generation
+    # fal.ai image generation (deprecated - now using Vertex AI)
     FAL_KEY: str = ""
+    
+    # Vertex AI (for image generation)
+    GOOGLE_CLOUD_PROJECT: str = ""
+    VERTEX_LOCATION: str = "us-central1"
+    GOOGLE_APPLICATION_CREDENTIALS: str = ""
 
     # AWS S3
     AWS_ACCESS_KEY_ID: str = ""

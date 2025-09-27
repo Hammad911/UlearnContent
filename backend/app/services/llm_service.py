@@ -35,8 +35,8 @@ class LLMService:
         # Image generation service (fal.ai)
         self.image_service = ImageService()
         
-        # S3 service for image uploads
-        self.s3_service = S3Service()
+        # S3 service for image uploads (using the upload_image_bytes function)
+        # No need to instantiate a class since we're using the function directly
     
         # Rate limiting
         self.last_gemini_call = 0
@@ -307,7 +307,7 @@ class LLMService:
                             diagram_prompt = self._build_image_prompt(main_chapter, subtopic, generated_text)
                             img_bytes = self.image_service.generate_diagram_png(diagram_prompt)
                             if img_bytes:
-                                image_url = self.s3_service.upload_image_bytes(img_bytes, main_chapter, subtopic)
+                                image_url = upload_image_bytes(img_bytes, main_chapter, subtopic)
                         except Exception as img_err:
                             logger.warning(f"Image generation/upload failed for '{subtopic}': {str(img_err)}")
 
