@@ -38,6 +38,10 @@ dist/
 .env.test.local
 .env.production.local
 
+# Google Cloud service account keys
+*.json
+loyal-env-472317-f7-8525629e95fb.json
+
 # IDE and editor files
 .vscode/
 .idea/
